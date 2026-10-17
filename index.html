@@ -812,51 +812,55 @@ if(!cfg.clientId)cfg.clientId=DEFAULT_CLIENT;
 var msalApp=null,account=null,pushTimer=null,busy=false;
 function setSync(msg,kind){
   var el=$("#syncStatus");el.textContent="OneDrive: "+msg;el.className=kind||"";
-  $("#syncNow").hidden=!account;
+  $("#syncNow").hidden=!cfg.clientId;
 }
 function cleanPath(p){return String(p||"").replace(/\\/g,"/").replace(/^\/+|\/+$/g,"")}
 function fileUrl(){return "https://graph.microsoft.com/v1.0/me/drive/root:/"+encodeURI(cleanPath(cfg.folder)+"/"+cleanPath(cfg.file))+":/content"}
 function redirectUri(){return location.origin+location.pathname}
+function needSignIn(){var e=new Error("sign-in needed. Press Sync now");e.signin=true;return e}
 function initMsal(){
-  if(!cfg.clientId){setSync("not connected");return false}
-  if(!window.msal){setSync("sign-in library did not load","no");return false}
+  if(!cfg.clientId){setSync("not connected");return Promise.resolve(null)}
+  if(!window.msal){setSync("sign-in library did not load","no");return Promise.resolve(null)}
   try{
-    msalApp=new msal.PublicClientApplication({auth:{clientId:cfg.clientId,authority:"https://login.microsoftonline.com/common",redirectUri:redirectUri()},cache:{cacheLocation:"localStorage"}});
-    account=msalApp.getAllAccounts()[0]||null;
-  }catch(e){setSync("setup error: "+e.message,"no");return false}
-  setSync(account?"connected as "+account.username:"not signed in",account?"ok":"");
-  return true;
+    msalApp=new msal.PublicClientApplication({auth:{clientId:cfg.clientId,authority:"https://login.microsoftonline.com/common",redirectUri:redirectUri(),navigateToLoginRequestUrl:true},cache:{cacheLocation:"localStorage"}});
+  }catch(e){setSync("setup error: "+e.message,"no");return Promise.resolve(null)}
+  return msalApp.handleRedirectPromise().then(function(r){
+    account=(r&&r.account)||msalApp.getAllAccounts()[0]||null;
+    setSync(account?"connected as "+account.username:"not signed in. Press Sync now to sign in",account?"ok":"");
+    return account;
+  }).catch(function(e){setSync("sign-in failed ("+(e.errorCode||e.message)+")","no");return null});
 }
 function token(interactive){
   var req={scopes:["Files.ReadWrite"],account:account};
   return msalApp.acquireTokenSilent(req).catch(function(e){
-    if(!interactive)throw e;
-    return msalApp.acquireTokenPopup(req);
+    if(!interactive)throw needSignIn();
+    msalApp.acquireTokenRedirect(req);
+    return new Promise(function(){});
   }).then(function(r){return r.accessToken});
 }
 function connect(){
-  if(!msalApp&&!initMsal())return Promise.resolve();
-  setSync("signing in…");
-  return msalApp.loginPopup({scopes:["Files.ReadWrite","User.Read"]}).then(function(r){account=r.account;return pull()})
-    .catch(function(e){setSync("sign-in failed ("+(e.errorCode||e.message)+")","no")});
+  if(!msalApp)return Promise.resolve();
+  setSync("opening Microsoft sign-in…");
+  msalApp.loginRedirect({scopes:["Files.ReadWrite","User.Read"]});
+  return new Promise(function(){});
 }
 function push(){
   if(!account||busy)return Promise.resolve();
   busy=true;setSync("saving…");
   var body=JSON.stringify({app:"reef-livestock",savedAt:state.savedAt||Date.now(),items:state.items.filter(function(i){return !i.example})},null,2);
-  return token(true).then(function(t){
+  return token(false).then(function(t){
     return fetch(fileUrl(),{method:"PUT",headers:{"Authorization":"Bearer "+t,"Content-Type":"application/json"},body:body}).then(function(r){
       if(!r.ok)throw new Error("HTTP "+r.status);
       return uploadPhotos(t);
     });
   }).then(function(){
     setSync("saved "+new Date().toLocaleTimeString("en-AU",{hour:"2-digit",minute:"2-digit"}),"ok");
-  }).catch(function(e){setSync("save failed ("+(e.message||e)+")","no")}).then(function(){busy=false});
+  }).catch(function(e){setSync(e.signin?e.message:"save failed ("+(e.message||e)+")","no")}).then(function(){busy=false});
 }
-function pull(){
+function pull(interactive){
   if(!account)return Promise.resolve();
   setSync("checking…");
-  return token(true).then(function(t){
+  return token(!!interactive).then(function(t){
     return fetch(fileUrl(),{headers:{"Authorization":"Bearer "+t}});
   }).then(function(r){
     if(r.status===404)return push();
@@ -869,7 +873,7 @@ function pull(){
         setSync("loaded latest from OneDrive","ok");
       }else{return push()}
     });
-  }).then(function(){return token(true).then(downloadMissing)}).catch(function(e){setSync("could not read file ("+(e.message||e)+")","no")});
+  }).then(function(){return token(false).then(downloadMissing)}).catch(function(e){setSync(e.signin?e.message:"could not read file ("+(e.message||e)+")","no")});
 }
 function photoUrl(id){return "https://graph.microsoft.com/v1.0/me/drive/root:/"+encodeURI(cleanPath(cfg.folder)+"/photos/"+id+".jpg")+":/content"}
 function uploadPhotos(t){
@@ -905,7 +909,7 @@ window.__reefSync=function(){
   if(!account)return;
   clearTimeout(pushTimer);pushTimer=setTimeout(push,1500);
 };
-$("#syncNow").onclick=function(){pull()};
+$("#syncNow").onclick=function(){if(!msalApp){initMsal().then(function(){if(msalApp&&!account)connect();else if(account)pull(true)});return}if(!account)connect();else pull(true)};
 var sdlg=$("#sdlg");
 $("#syncSet").onclick=function(){
   $("#sClient").value=cfg.clientId;$("#sFolder").value=cfg.folder;$("#sFile").value=cfg.file;$("#sRedirect").value=redirectUri();
@@ -926,12 +930,10 @@ $("#sform").addEventListener("submit",function(e){
   cfg.file=cleanPath($("#sFile").value)||"reef-livestock.json";
   try{localStorage.setItem(CFG_KEY,JSON.stringify(cfg))}catch(x){}
   msalApp=null;account=null;sdlg.close();
-  if(initMsal()){account?pull():connect()}
+  initMsal().then(function(){if(msalApp&&!account)connect();else if(account)pull(true)});
 });
 
 /* ---------- Boot ---------- */
-initMsal();
-if(account)pull();
 if(!load()){state.items=examples()}
 renderAll();
 if(window.matchMedia&&matchMedia("(min-width:861px)").matches&&state.items.length){
@@ -939,6 +941,7 @@ if(window.matchMedia&&matchMedia("(min-width:861px)").matches&&state.items.lengt
   var first=state.items.find(function(i){return i.id===state.selected});
   if(first&&!(first.info&&first.info.fetched)&&!session.looked[first.id])lookup(first.id,false);
 }
+initMsal().then(function(a){if(a)pull(false)});
 })();
 </script>
 </body>
