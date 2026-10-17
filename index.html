@@ -192,7 +192,7 @@ form.f h2{grid-column:1/-1;font:700 22px var(--display);margin:0}
     <div class="fld full"><label for="sAuth">Sign-in authority</label>
       <input type="text" id="sAuth" list="authList" autocomplete="off">
       <datalist id="authList"><option value="common"><option value="consumers"><option value="organizations"></datalist>
-      <span class="hint">common = any Microsoft account (matches "any organizational directory and personal accounts"). Use consumers if the registration is personal accounts only, or your tenant ID if it is single-tenant.</span></div>
+      <span class="hint">consumers = personal Microsoft accounts only (your registration). Use common if the registration allows any organizational directory and personal accounts, or your tenant ID if it is single-tenant.</span></div>
     <div class="fld full"><label for="sRedirect">Redirect URI to register in Azure</label>
       <input type="text" id="sRedirect" readonly></div>
     <div class="fa">
@@ -810,7 +810,7 @@ window.addEventListener("drop",function(e){e.preventDefault()});
 /* ---------- OneDrive sync (Microsoft Graph, file kept in the Reef Livestock folder) ---------- */
 var CFG_KEY="reefLivestock.cfg";
 var DEFAULT_CLIENT="c2654a4a-499e-4a43-b74a-5a687b5b9f4d";
-var cfg={clientId:DEFAULT_CLIENT,folder:"marc.kirsten/Browser Tools/Reef Livestock",file:"reef-livestock.json",authority:"common"};
+var cfg={clientId:DEFAULT_CLIENT,folder:"marc.kirsten/Browser Tools/Reef Livestock",file:"reef-livestock.json",authority:"consumers"};
 try{Object.assign(cfg,JSON.parse(localStorage.getItem(CFG_KEY)||"{}"))}catch(e){}
 if(!cfg.clientId)cfg.clientId=DEFAULT_CLIENT;
 var msalApp=null,account=null,pushTimer=null,busy=false;
@@ -830,13 +830,22 @@ function initMsal(){
   if(!cfg.clientId){setSync("not connected");return Promise.resolve(null)}
   if(!window.msal){setSync("sign-in library did not load","no");return Promise.resolve(null)}
   try{
-    msalApp=new msal.PublicClientApplication({auth:{clientId:cfg.clientId,authority:"https://login.microsoftonline.com/"+(cleanPath(cfg.authority)||"common"),redirectUri:redirectUri(),navigateToLoginRequestUrl:true},cache:{cacheLocation:"localStorage"}});
+    msalApp=new msal.PublicClientApplication({auth:{clientId:cfg.clientId,authority:"https://login.microsoftonline.com/"+(cleanPath(cfg.authority)||"consumers"),redirectUri:redirectUri(),navigateToLoginRequestUrl:true},cache:{cacheLocation:"localStorage"}});
   }catch(e){setSync("setup error: "+e.message,"no");return Promise.resolve(null)}
   return msalApp.handleRedirectPromise().then(function(r){
     account=(r&&r.account)||msalApp.getAllAccounts()[0]||null;
     setSync(account?"connected as "+account.username:"not signed in. Press Sync now to sign in",account?"ok":"");
     return account;
-  }).catch(function(e){setSync("sign-in failed: "+errText(e),"no");return null});
+  }).catch(function(e){
+    var t=errText(e);
+    if(/userAudience/i.test(t)&&cleanPath(cfg.authority)!=="consumers"){
+      cfg.authority="consumers";try{localStorage.setItem(CFG_KEY,JSON.stringify(cfg))}catch(x){}
+      setSync("switching to personal-account sign-in…");
+      msalApp=null;
+      return initMsal().then(function(a){if(!a&&msalApp)connect();return a});
+    }
+    setSync("sign-in failed: "+t,"no");return null;
+  });
 }
 function token(interactive){
   var req={scopes:["Files.ReadWrite"],account:account};
@@ -936,7 +945,7 @@ $("#sform").addEventListener("submit",function(e){
   cfg.clientId=$("#sClient").value.trim();
   cfg.folder=cleanPath($("#sFolder").value)||"marc.kirsten/Browser Tools/Reef Livestock";
   cfg.file=cleanPath($("#sFile").value)||"reef-livestock.json";
-  cfg.authority=cleanPath($("#sAuth").value)||"common";
+  cfg.authority=cleanPath($("#sAuth").value)||"consumers";
   try{localStorage.setItem(CFG_KEY,JSON.stringify(cfg))}catch(x){}
   msalApp=null;account=null;sdlg.close();
   initMsal().then(function(){if(msalApp&&!account)connect();else if(account)pull(true)});
