@@ -173,7 +173,7 @@ form.f h2{grid-column:1/-1;font:700 22px var(--display);margin:0}
     <span id="syncStatus">OneDrive: not connected</span>
     <span class="actions">
       <button class="btn small" id="syncNow" hidden>Sync now</button>
-      <button class="btn small" id="syncSet">OneDrive settings</button>
+      <button class="btn small" id="syncSet">Settings</button>
     </span>
   </div>
   <p class="hint">Data is always saved in this browser. When OneDrive is connected it is also saved to <code>reef-livestock.json</code> in your Reef Livestock folder, with photos in its <code>photos</code> subfolder.</p>
@@ -181,7 +181,10 @@ form.f h2{grid-column:1/-1;font:700 22px var(--display);margin:0}
 
 <dialog id="sdlg">
   <form class="f" id="sform" method="dialog">
-    <h2>OneDrive settings</h2>
+    <h2>Settings</h2>
+    <div class="fld full"><label for="sRelay">Lookup relay URL (for LiveAquaria info)</label>
+      <input type="text" id="sRelay" placeholder="https://reef-lookup.your-name.workers.dev" autocomplete="off">
+      <span class="hint">The Cloudflare Worker that lets this page read LiveAquaria. Leave blank to use Wikipedia and the built-in guide only.</span></div>
     <div class="fld full"><label for="sClient">Application (client) ID</label>
       <input type="text" id="sClient" placeholder="Azure app registration ID" autocomplete="off">
       <span class="hint">Create a separate Azure app registration for this tool, as for your other tools (Single-page application, delegated permission Files.ReadWrite).</span></div>
@@ -520,12 +523,13 @@ function scoreTitle(title,q){
   var hit=qs.filter(function(w){return t.indexOf(w)>-1}).length;
   return hit/qs.length - (/wysiwyg/i.test(title)?0.05:0);
 }
+function laUrl(u){var r=(typeof cfg!=="undefined"&&cfg.relay||"").trim().replace(/\/+$/,"");return r?r+"/?url="+encodeURIComponent(u):u}
 function laLookup(queries){
   var chain=Promise.resolve(null),firstErr=null;
   queries.forEach(function(q){
     chain=chain.then(function(found){
       if(found)return found;
-      return getJSON(LA+"/search/suggest.json?q="+encodeURIComponent(q)+"&resources[type]=product&resources[limit]=6")
+      return getJSON(laUrl(LA+"/search/suggest.json?q="+encodeURIComponent(q)+"&resources[type]=product&resources[limit]=6"))
        .then(function(s){
          var list=(s&&s.resources&&s.resources.results&&s.resources.results.products)||[];
          var best=null,bs=0;
@@ -538,8 +542,8 @@ function laLookup(queries){
     if(!f)return {status:"nomatch"};
     var p=f.p,out={status:"ok",url:LA+"/products/"+p.handle,title:p.title,image:p.image||(p.featured_image&&p.featured_image.url)||null};
     var jobs=[
-      getJSON(LA+"/products/"+p.handle+".json").then(function(j){var pr=j.product;out.summary=htmlToText(pr.body_html);out.sci=pr.product_type;if(pr.image&&pr.image.src)out.image=pr.image.src}).catch(function(){}),
-      getText(out.url).then(function(h){var r=parseFacts(h);out.facts=r.facts;out.family=r.family}).catch(function(){})
+      getJSON(laUrl(LA+"/products/"+p.handle+".json")).then(function(j){var pr=j.product;out.summary=htmlToText(pr.body_html);out.sci=pr.product_type;if(pr.image&&pr.image.src)out.image=pr.image.src}).catch(function(){}),
+      getText(laUrl(out.url)).then(function(h){var r=parseFacts(h);out.facts=r.facts;out.family=r.family}).catch(function(){})
     ];
     return Promise.all(jobs).then(function(){return out});
   });
@@ -583,7 +587,7 @@ function lookup(id,manual){
       info.sources.push({name:"LiveAquaria",url:L.url,ok:true});
       if(!it.sci&&L.sci)it.sci=L.sci;
     }else{
-      info.sources.push({name:"LiveAquaria",ok:false,note:L&&L.status==="nomatch"?"no matching product":"not reachable from this browser"});
+      info.sources.push({name:"LiveAquaria",ok:false,note:L&&L.status==="nomatch"?"no matching product":(cfg.relay?"the lookup relay could not fetch it":"blocked by the browser. Add the lookup relay in Settings")});
     }
     if(W){
       if(!info.image&&W.image)info.image=W.image;
@@ -809,10 +813,12 @@ window.addEventListener("drop",function(e){e.preventDefault()});
 
 /* ---------- OneDrive sync (Microsoft Graph, file kept in the Reef Livestock folder) ---------- */
 var CFG_KEY="reefLivestock.cfg";
+var DEFAULT_RELAY="https://reef-lookup.marc-kirsten.workers.dev";
 var DEFAULT_CLIENT="c2654a4a-499e-4a43-b74a-5a687b5b9f4d";
-var cfg={clientId:DEFAULT_CLIENT,folder:"marc.kirsten/Browser Tools/Reef Livestock",file:"reef-livestock.json",authority:"consumers"};
+var cfg={clientId:DEFAULT_CLIENT,folder:"marc.kirsten/Browser Tools/Reef Livestock",file:"reef-livestock.json",authority:"consumers",relay:DEFAULT_RELAY};
 try{Object.assign(cfg,JSON.parse(localStorage.getItem(CFG_KEY)||"{}"))}catch(e){}
 if(!cfg.clientId)cfg.clientId=DEFAULT_CLIENT;
+if(!cfg.relay)cfg.relay=DEFAULT_RELAY;
 var msalApp=null,account=null,pushTimer=null,busy=false;
 function setSync(msg,kind){
   var el=$("#syncStatus");el.textContent="OneDrive: "+msg;el.className=kind||"";
@@ -929,7 +935,7 @@ window.__reefSync=function(){
 $("#syncNow").onclick=function(){if(!msalApp){initMsal().then(function(){if(msalApp&&!account)connect();else if(account)pull(true)});return}if(!account)connect();else pull(true)};
 var sdlg=$("#sdlg");
 $("#syncSet").onclick=function(){
-  $("#sClient").value=cfg.clientId;$("#sFolder").value=cfg.folder;$("#sFile").value=cfg.file;$("#sAuth").value=cfg.authority;$("#sRedirect").value=redirectUri();
+  $("#sRelay").value=cfg.relay||"";$("#sClient").value=cfg.clientId;$("#sFolder").value=cfg.folder;$("#sFile").value=cfg.file;$("#sAuth").value=cfg.authority;$("#sRedirect").value=redirectUri();
   sdlg.showModal();
 };
 $("#sCancel").onclick=function(){sdlg.close()};
@@ -942,6 +948,7 @@ $("#sOut").onclick=function(){
 };
 $("#sform").addEventListener("submit",function(e){
   e.preventDefault();
+  cfg.relay=$("#sRelay").value.trim();
   cfg.clientId=$("#sClient").value.trim();
   cfg.folder=cleanPath($("#sFolder").value)||"marc.kirsten/Browser Tools/Reef Livestock";
   cfg.file=cleanPath($("#sFile").value)||"reef-livestock.json";
